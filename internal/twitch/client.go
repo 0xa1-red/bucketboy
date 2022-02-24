@@ -64,7 +64,7 @@ func New(config ClientConfig) (*Client, error) {
 		Token:        config.Token,
 		Capabilities: config.Capabilities,
 
-		UsersInChannel: make(map[string][]Source, 0),
+		UsersInChannel: make(map[string][]Source),
 	}
 
 	return &client, nil
