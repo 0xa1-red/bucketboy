@@ -4,7 +4,7 @@ services:
   bucket:
     image: alfreddobradi/bucketboy:0.1
     environment:
-      - TWITCH_CHANNEL=value
-      - TWITCH_USERNAME=value
-      - TWITCH_TOKEN=value
+      - TWITCH_CHANNEL=${TWITCH_CHANNEL}
+      - TWITCH_USERNAME=${TWITCH_USERNAME}
+      - TWITCH_TOKEN=${TWITCH_TOKEN}
     command: [ "/usr/bin/bucketboy" ]
