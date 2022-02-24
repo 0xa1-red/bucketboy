@@ -1,0 +1,10 @@
+version: '3'
+
+services:
+  bucket:
+    image: alfreddobradi/bucketboy:0.1
+    environment:
+      - TWITCH_CHANNEL=value
+      - TWITCH_USERNAME=value
+      - TWITCH_TOKEN=value
+    command: [ "/usr/bin/bucketboy" ]
