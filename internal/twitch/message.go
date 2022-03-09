@@ -2,7 +2,6 @@ package twitch
 
 import (
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"
@@ -45,7 +44,7 @@ func ParseMessage(message string) ([]Message, error) {
 		}
 
 		if index > len(parts) {
-			log.Println("partial message")
+			Logger().Println("partial message")
 		}
 
 		if strings.HasPrefix(parts[index], ":") {
@@ -56,7 +55,7 @@ func ParseMessage(message string) ([]Message, error) {
 			m.Source = source
 			index++
 		}
-		// log.Printf("%v", x)
+		// Logger().Printf("%v", x)
 
 		if index > len(parts) {
 			return nil, fmt.Errorf("No command")
