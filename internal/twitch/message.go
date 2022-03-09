@@ -2,7 +2,6 @@ package twitch
 
 import (
 	"fmt"
-	"log"
 	"regexp"
 	"strings"
 	"time"

@@ -2,9 +2,57 @@ version: '3'
 
 services:
   bucket:
-    image: alfreddobradi/bucketboy:0.1
+    image: alfreddobradi/bucketboy:0.4
     environment:
       - TWITCH_CHANNEL=${TWITCH_CHANNEL}
       - TWITCH_USERNAME=${TWITCH_USERNAME}
       - TWITCH_TOKEN=${TWITCH_TOKEN}
     command: [ "/usr/bin/bucketboy" ]
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      fluentd:
+        condition: service_healthy
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: bucketboy
+  fluentd:
+    build: ./fluentd
+    volumes:
+      - ./fluentd/conf:/fluentd/etc
+    links:
+      - "elasticsearch"
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    healthcheck:
+      test: curl -s -f localhost:24220/api/plugins.json >/dev/null || exit 1
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:7.13.1
+    container_name: elasticsearch
+    environment:
+      - "discovery.type=single-node"
+    expose:
+      - "9200"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: curl -u elastic:elastic -s -f elasticsearch:9200/_cat/health >/dev/null || exit 1
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:7.13.1
+    links:
+      - "elasticsearch"
+    ports:
+      - "5601:5601"

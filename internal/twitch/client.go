@@ -2,12 +2,12 @@ package twitch
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/sirupsen/logrus"
 )
 
 type TwitchCap string
@@ -19,12 +19,17 @@ const (
 )
 
 const (
-	ActionPing      string = "PING"
-	ActionJoin      string = "JOIN"
-	ActionPart      string = "PART"
-	ActionUserstate string = "USERSTATE"
-	ActionRoomstate string = "ROOMSTATE"
-	ActionPrivmsg   string = "PRIVMSG"
+	ActionPass       string = "PASS"
+	ActionNick       string = "NICK"
+	ActionPing       string = "PING"
+	ActionPong       string = "PONG"
+	ActionJoin       string = "JOIN"
+	ActionPart       string = "PART"
+	ActionUserstate  string = "USERSTATE"
+	ActionRoomstate  string = "ROOMSTATE"
+	ActionPrivmsg    string = "PRIVMSG"
+	ActionNotice     string = "USERNOTICE"
+	ActionCapRequest string = "CAP REQ"
 )
 
 const (
@@ -42,8 +47,18 @@ type Client struct {
 	Capabilities []TwitchCap
 	Username     string
 	Token        string
+	Channels     []string
 
 	UsersInChannel map[string][]Source
+
+	onMessageCallbacks []func(message Message)
+}
+
+func (c *Client) RegisterOnMessageCallback(fn func(message Message)) {
+	c.mx.Lock()
+	defer c.mx.Unlock()
+
+	c.onMessageCallbacks = append(c.onMessageCallbacks, fn)
 }
 
 type ClientConfig struct {
@@ -51,6 +66,7 @@ type ClientConfig struct {
 	Token        string
 	TLS          bool // TODO
 	Capabilities []TwitchCap
+	Channels     []string
 }
 
 func New(config ClientConfig) (*Client, error) {
@@ -63,9 +79,14 @@ func New(config ClientConfig) (*Client, error) {
 		Username:     config.Username,
 		Token:        config.Token,
 		Capabilities: config.Capabilities,
+		Channels:     config.Channels,
 
-		UsersInChannel: make(map[string][]Source, 0),
+		UsersInChannel: make(map[string][]Source),
+
+		onMessageCallbacks: make([]func(message Message), 0),
 	}
+
+	client.RegisterOnMessageCallback(banCommand)
 
 	return &client, nil
 }
@@ -85,17 +106,19 @@ func (c *Client) Connect(shutdown chan struct{}) {
 	}
 
 	for _, cap := range c.Capabilities {
-		if err := c.Send(fmt.Sprintf("CAP REQ :twitch.tv/%s", cap)); err != nil {
+		if err := c.Send(ActionCapRequest, fmt.Sprintf(":twitch.tv/%s", cap)); err != nil {
 			c.Errors <- fmt.Errorf("Error requesting capability '%s': %v", cap, err)
 		}
 	}
+
+	c.Join(c.Channels...)
 
 	go func() {
 		defer close(shutdown)
 		for {
 			select {
 			case <-c.Stop:
-				log.Println("Client: Interrupt received")
+				log.Info("Signal received, stopping.")
 				return
 			default:
 				kind, message, err := c.ReadMessage()
@@ -104,11 +127,11 @@ func (c *Client) Connect(shutdown chan struct{}) {
 						c.Errors <- fmt.Errorf("error reading message: %v", err)
 						return
 					} else {
-						log.Println("Connection closed.")
+						log.Info("Connection closed.")
 						return
 					}
 				}
-
+				log.Println(string(message))
 				switch kind {
 				case websocket.TextMessage:
 					msgs, err := ParseMessage(string(message))
@@ -128,10 +151,9 @@ func (c *Client) Connect(shutdown chan struct{}) {
 }
 
 func (c *Client) Close(done chan struct{}) error {
-	log.Println("Closing connection")
+	log.Info("Attempting to close connection")
 	err := c.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	if err != nil {
-		log.Println("write close:", err)
 		return err
 	}
 	select {
@@ -141,16 +163,23 @@ func (c *Client) Close(done chan struct{}) error {
 	return c.Conn.Close()
 }
 
-func (c *Client) Send(message string) error {
-	log.Printf("> %s", message)
-	return c.Conn.WriteMessage(websocket.TextMessage, []byte(message))
+func (c *Client) Send(command string, message string) error {
+	msg := []byte(fmt.Sprintf("%s %s", command, message))
+	if command == ActionPass {
+		message = "[redacted]"
+	}
+	log.WithFields(logrus.Fields{
+		"command": command,
+		"message": message,
+	}).Debug("Sending message")
+	return c.Conn.WriteMessage(websocket.TextMessage, msg)
 }
 
 func (c *Client) Authenticate(username, token string) error {
-	if err := c.Send(fmt.Sprintf("PASS %s", token)); err != nil {
+	if err := c.Send(ActionPass, token); err != nil {
 		return fmt.Errorf("error sending token: %v", err)
 	}
-	if err := c.Send(fmt.Sprintf("NICK %s", username)); err != nil {
+	if err := c.Send(ActionNick, username); err != nil {
 		return fmt.Errorf("error sending username: %v", err)
 	}
 
@@ -159,7 +188,7 @@ func (c *Client) Authenticate(username, token string) error {
 
 func (c *Client) Join(channels ...string) {
 	for _, channel := range channels {
-		c.Send(fmt.Sprintf("JOIN #%s", channel)) // nolint
+		c.Send(ActionJoin, channel) // nolint
 	}
 }
 
@@ -205,36 +234,73 @@ func (c *Client) handlePart(parting Source, channel string) {
 	c.UsersInChannel[channel] = newList
 }
 
+func (c *Client) handlePrivmsg(message Message) {
+	c.mx.Lock()
+	defer c.mx.Unlock()
+	for _, fn := range c.onMessageCallbacks {
+		fn(message)
+	}
+}
+
 func (c *Client) route(message Message) error {
 	switch message.Action {
 	case ActionPing:
-		if err := c.Send("PONG :tmi.twitch.tv"); err != nil {
+		if err := c.Send(ActionPong, ":tmi.twitch.tv"); err != nil {
 			return err
 		}
 	case ActionJoin:
-		log.Printf("< %s has joined %s", message.Source.Nickname, message.Params[0])
+		log.WithFields(logrus.Fields{
+			"nickname": message.Source.Nickname,
+			"channel":  message.Params[0],
+		}).Debug("User joined channel")
 		c.handleJoin(message.Source, message.Params[0])
 	case ActionPart:
-		log.Printf("< %s has parted %s", message.Source.Nickname, message.Params[0])
+		log.WithFields(logrus.Fields{
+			"nickname": message.Source.Nickname,
+			"channel":  message.Params[0],
+		}).Debug("User parted channel")
 		c.handlePart(message.Source, message.Params[0])
 	case ActionRoomstate:
-		states := []string{}
-		for k, v := range message.Tags {
-			states = append(states, fmt.Sprintf("%s: %s", k, v))
+		fields := map[string]interface{}{
+			"channel": message.Params[0],
 		}
-		log.Printf("< ROOMSTATE for %s: %s", message.Params[0], strings.Join(states, "; "))
+		for k, v := range message.Tags {
+			fields[k] = v
+		}
+
+		log.WithFields(logrus.Fields(fields)).Info("Room state received")
 	case ActionUserstate:
-		states := []string{}
-		for k, v := range message.Tags {
-			states = append(states, fmt.Sprintf("%s: %s", k, v))
+		fields := map[string]interface{}{
+			"channel": message.Params[0],
 		}
-		log.Printf("< USERSTATE for %s: %s", message.Params[0], strings.Join(states, "; "))
+		for k, v := range message.Tags {
+			fields[k] = v
+		}
+
+		log.WithFields(logrus.Fields(fields)).Info("User state received")
 	case ActionPrivmsg:
-		states := []string{}
-		for k, v := range message.Tags {
-			states = append(states, fmt.Sprintf("%s: %s", k, v))
+		fields := map[string]interface{}{
+			"nickname": message.Source.Nickname,
+			"channel":  message.Params[0],
+			"message":  strings.TrimPrefix(strings.Join(message.Params[1:], " "), ":"),
 		}
-		log.Printf("< PRIVMSG from %s (%s) in %s: %s", message.Source.Nickname, strings.Join(states, "; "), message.Params[0], strings.TrimPrefix(strings.Join(message.Params[1:], " "), ":"))
+		for k, v := range message.Tags {
+			fields[k] = v
+		}
+
+		c.handlePrivmsg(message)
+
+		log.WithFields(logrus.Fields(fields)).Info("Message received")
+	case ActionNotice:
+		fields := map[string]interface{}{
+			"nickname": message.Source.Nickname,
+			"channel":  message.Params[0],
+			"message":  strings.TrimPrefix(strings.Join(message.Params[1:], " "), ":"),
+		}
+		for k, v := range message.Tags {
+			fields[k] = v
+		}
+		log.WithFields(logrus.Fields(fields)).Info("Notice received")
 	default:
 		log.Println("< " + message.Raw)
 	}
