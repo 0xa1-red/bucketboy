@@ -3,12 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 
+	"github.com/alfreddobradi/twitchbot/internal/logging"
 	"github.com/alfreddobradi/twitchbot/internal/twitch"
-	"github.com/davecgh/go-spew/spew"
 )
 
 var (
@@ -18,6 +17,8 @@ var (
 )
 
 func main() {
+	log := logging.New()
+
 	flag.StringVar(&username, "username", "justinfan123123", "Username to connect with.")
 	flag.StringVar(&token, "token", "oauth:59301", "OAuth token to connect with.")
 	flag.StringVar(&channel, "channel", "", "Channel to join on connect")
@@ -45,10 +46,11 @@ func main() {
 		Username:     username,
 		Token:        token,
 		Capabilities: []twitch.TwitchCap{twitch.Membership, twitch.Commands, twitch.Tags},
+		Channels:     []string{channel},
 	}
 	client, err := twitch.New(clientConfig)
 	if err != nil {
-		log.Printf("Error creating client: %v", err)
+		log.WithError(err).Fatal("Couldn't create client")
 	}
 
 	shutdown := make(chan struct{})
@@ -56,9 +58,7 @@ func main() {
 		for {
 			select {
 			case err := <-client.Errors:
-				// if errors.Is(err, )
-				log.Println("ERROR: " + err.Error())
-				spew.Dump(err)
+				log.WithError(err).Error("Client error")
 			case <-interrupt:
 				client.Close(shutdown)
 			}
@@ -67,9 +67,6 @@ func main() {
 
 	client.Connect(shutdown)
 
-	if err := client.Send(fmt.Sprintf("JOIN #%s", channel)); err != nil {
-		panic(err)
-	}
-
 	<-shutdown
+	log.Info("Shutting down")
 }
